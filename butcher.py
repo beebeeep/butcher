@@ -11,6 +11,7 @@ import logging
 import re
 import atexit
 import signal
+import argparse
 
 logging.basicConfig(filename='/tmp/butcher.log', level=logging.DEBUG)
 BUTCHER_DIR = os.path.join(os.environ['HOME'], '.butcher')
@@ -59,10 +60,11 @@ class CommandCompleter(object):
 
 class Butcher(object):
 
-    def __init__(self):
+    def __init__(self, cached=True):
         self.commands = ['exec', 'p_exec', 'hostlist', 'reload', 'threads', 'user']
+        self.threads=50
         self._shmux_running = False
-        self._load_hosts()
+        self._load_hosts(cached=cached)
         readline.parse_and_bind('tab: complete')
         readline.set_completer(CommandCompleter(commands=self.commands, roles=self.roles, envs=self.envs).complete)
         readline.set_completer_delims(' ')
@@ -84,19 +86,22 @@ class Butcher(object):
         return __handler
 
     def _load_hosts(self, env = None, cached=True):
-        result = []
         cache_filename = os.path.join(BUTCHER_DIR, 'cache.json')
+        self.hosts = []
         if not cached or not os.path.isfile(cache_filename):
             if not os.path.isdir(BUTCHER_DIR):
                 os.mkdir(BUTCHER_DIR)
-            f = open(cache_filename, 'w')
             cmd = shlex.split("knife search node '*' -a roles -a hostname -a chef_environment -F json")
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
             data = json.load(p.stdout)
             print "Loaded {} hosts".format(data['results'])
-            json.dump(data['rows'], f)
+
+            for host in data['rows']:
+                name = host.keys()[0]
+                self.hosts.append(host[name])
+            f = open(cache_filename, 'w')
+            json.dump(self.hosts, f)
             f.close()
-            self.hosts = data['rows']
         else:
             f = open(cache_filename, 'r')
             self.hosts = json.load(f)
@@ -104,6 +109,7 @@ class Butcher(object):
         self.roles = set()
         self.envs = set()
         for host in self.hosts:
+            logging.debug("Processing host %s", host)
             self.roles.update(['%' + role for role in host['roles']])
             self.envs.add('@' + host['chef_environment'])
 
@@ -123,6 +129,21 @@ class Butcher(object):
                     return
                 for host in filtered_hosts:
                     print host['hostname']
+            elif m.group('cmd') == 'reload':
+                self._load_hosts(cached=False)
+            elif m.group('cmd') == 'threads':
+                try:
+                    logging.debug("Setting threads to %s", m.group('args'))
+                    self.threads = int(m.group('args'))
+                except ValueError:
+                    print "Invalid value"
+            elif m.group('cmd') == 'user':
+                if m.group('args') != None:
+                    logging.debug("Setting user to %s", m.group('args'))
+                    self.user = m.group('args')
+                else:
+                    print "Invalid value"
+
             elif m.group('cmd') == 'p_exec':
                 if not m.group('role') or not m.group('args'):
                     print "USAGE: p_exec %WHAT[@WHERE] COMMAND"
@@ -150,4 +171,7 @@ class Butcher(object):
                 break
 
 if __name__ == '__main__':
-    Butcher().run()
+    p = argparse.ArgumentParser(description="Butcher, the shmux shell")
+    p.add_argument('-c', '--cached', action='store_true', default=False)
+    args = p.parse_args()
+    Butcher(cached=args.cached).run()
