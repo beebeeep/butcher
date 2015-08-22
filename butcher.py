@@ -12,6 +12,8 @@ import re
 import atexit
 import signal
 import argparse
+import getpass
+import traceback
 
 logging.basicConfig(filename='/tmp/butcher.log', level=logging.DEBUG)
 BUTCHER_DIR = os.path.join(os.environ['HOME'], '.butcher')
@@ -38,8 +40,9 @@ class CommandCompleter(object):
         if len(tokens) == 1:
             opts = self.commands
         elif len(tokens) == 2:
-            if tokens[1].find('@') > 0:
-                role = tokens[1].split('@')[0]
+            string = tokens[1].split(',')[-1]       #comma-separated list of hosts/roles
+            if string.find('@') > 0:
+                role = string.split('@')[0]
                 logging.debug(envs)
                 opts = [role + e for e in self.envs]
             else:
@@ -62,12 +65,21 @@ class Butcher(object):
 
     def __init__(self, cached=True):
         self.commands = ['exec', 'p_exec', 'hostlist', 'reload', 'threads', 'user']
+        self.usage = {
+                'reload': 'reload',
+                'user': 'user USER',
+                'threads': 'threads THREADS',
+                'hostlist': 'hostlist %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...]',
+                'p_exec': 'p_exec %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...] COMMAND',
+                'exec': 'exec %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...] COMMAND'
+                }
+        self.user = getpass.getuser()
         self.threads=50
         self._shmux_running = False
         self._load_hosts(cached=cached)
         readline.parse_and_bind('tab: complete')
         readline.set_completer(CommandCompleter(commands=self.commands, roles=self.roles, envs=self.envs).complete)
-        readline.set_completer_delims(' ')
+        readline.set_completer_delims(' ,')
         histfile=os.path.join(BUTCHER_DIR, 'history')
         try:
             readline.read_history_file(histfile)
@@ -76,6 +88,9 @@ class Butcher(object):
         atexit.register(readline.write_history_file, histfile)
         signal.signal(signal.SIGINT, self._sigint())
 
+
+    def _get_ps(self):
+        return "{} > ".format(self.user)
 
     def _sigint(self):
         def __handler(signal, frame):
@@ -113,56 +128,79 @@ class Butcher(object):
             self.roles.update(['%' + role for role in host['roles']])
             self.envs.add('@' + host['chef_environment'])
 
-    def _filter_hosts(self, role=None, env=None):
-        logging.debug('filtering role %s env %s', role, env)
-        for host in (h for h in self.hosts if role in h['roles']):
-            if env == None or env == host['chef_environment']:
-                yield host
+    def _filter_hosts(self, string):
+        for token in string.split(','):
+            m = re.search('^%([-_A-Z-a-z0-9]+)(?:@([-_A-Za-z0-9]+))?$', token)
+            if m:
+                # treat token as %role[@env]
+                (role, env) = m.groups()
+                logging.debug('filtering role %s env %s', role, env)
+                for host in (h for h in self.hosts if role in h['roles']):
+                    if env == None or env == host['chef_environment']:
+                        yield host['hostname']
+            else:
+                # treat token as host
+                yield token
 
     def _parse_and_run(self, command):
         m = re.match("^\s*(?P<cmd>\w+)(?:\s+%(?P<role>[-_A-Za-z0-9]+)(?:@(?P<env>[-_A-Za-z0-9]+))?)?\s*(?P<args>.+)*$", command)
-        if m:
-            filtered_hosts = list(self._filter_hosts(role=m.group('role'), env=m.group('env')))
-            if m.group('cmd') == 'hostlist':
-                if not m.group('role'):
-                    print "USAGE: hostlist %WHAT[@WHERE]"
-                    return
-                for host in filtered_hosts:
-                    print host['hostname']
-            elif m.group('cmd') == 'reload':
-                self._load_hosts(cached=False)
-            elif m.group('cmd') == 'threads':
-                try:
-                    logging.debug("Setting threads to %s", m.group('args'))
-                    self.threads = int(m.group('args'))
-                except ValueError:
-                    print "Invalid value"
-            elif m.group('cmd') == 'user':
-                if m.group('args') != None:
-                    logging.debug("Setting user to %s", m.group('args'))
-                    self.user = m.group('args')
-                else:
-                    print "Invalid value"
+        # remove extra spaces
+        # command = re.sub("^\s*(\w+)\s+", "\g<1> ", command)
+        tokens = shlex.split(command)
+        cmd = tokens[0]
+        if cmd not in self.commands:
+            print "Available commands:\n{}".format(', '.join(self.commands))
+            return
 
-            elif m.group('cmd') == 'p_exec':
-                if not m.group('role') or not m.group('args'):
-                    print "USAGE: p_exec %WHAT[@WHERE] COMMAND"
+        try:
+            if cmd == 'reload':
+                self._load_hosts(cached=False)
+                return
+            if cmd == 'threads':
+                self.threads = int(tokens[1])
+                return
+            if cmd == 'user':
+                self.user = tokens[1]
+                return
+            if cmd in ('hostlist', 'exec', 'p_exec'):
+                filtered_hosts = set(self._filter_hosts(tokens[1]))
+                if cmd == 'hostlist':
+                    for host in filtered_hosts:
+                        print host
                     return
-                cmd = shlex.split("shmux -c '{}' -".format(m.group('args')))
-                logging.debug("Executing '%s' on %s", cmd, ','.join( (h['hostname'] for h in filtered_hosts) ))
+
+                if cmd == 'exec':
+                    threads = 1
+                elif cmd == 'p_exec':
+                    threads = self.threads
+
+                if not tokens[2:]:
+                    raise Exception("Specify command to execute")
+
+                remote_cmd = ' '.join(tokens[2:])
+                shmux_cmd = shlex.split("shmux -B -M{} -c '{}' -".format(threads, remote_cmd))
+
+                logging.debug("Executing '%s' on %s", shmux_cmd, ','.join(filtered_hosts))
                 try:
                     self._shmux_running = True
-                    p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-                    ret = p.communicate(input='\n'.join((h['hostname'] for h in filtered_hosts)) + '\n' )
+                    os.environ['SHMUX_SSH_OPTS'] = '-l {}'.format(self.user)
+                    p = subprocess.Popen(shmux_cmd, stdin=subprocess.PIPE)
+                    ret = p.communicate(input='\n'.join(filtered_hosts) + '\n' )
+                except OSError as e:
+                    print "Cannot launch shmux: {}".format(e)
                 finally:
                     self._shmux_running = False
-        else:
-            print "Cannot parse command"
+                return
+        except Exception as e:
+            logging.debug("Got exception %s, %s", sys.exc_info(), traceback.extract_tb(sys.exc_traceback))
+            print "USAGE:\n\t{}".format(self.usage[cmd])
+            return
+
 
     def run(self):
         while True:
             try:
-                command = raw_input("> ")
+                command = raw_input(self._get_ps())
                 self._parse_and_run(command)
             except KeyboardInterrupt:
                 print "\n"
