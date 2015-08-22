@@ -20,33 +20,27 @@ BUTCHER_DIR = os.path.join(os.environ['HOME'], '.butcher')
 
 class CommandCompleter(object):
 
-    def __init__(self, commands=[], roles=[], envs=[]):
+    def __init__(self, commands=[], clusters=[], regions=[]):
         self.commands = sorted(commands)
-        self.roles = sorted(roles)
-        self.envs = sorted(envs)
+        self.clusters = sorted(clusters)
+        self.regions = sorted(regions)
         return
-
-    def _purify_input(self, string):
-        string = re.sub("\s+", " ", string)
-        string = re.sub("^\s+", "", string)
-        return string
 
     def complete(self, text, state):
         response = None
-        cmd = self._purify_input(readline.get_line_buffer())
-        tokens = cmd.split(' ')
+        tokens = shlex.split(readline.get_line_buffer())
         opts = []
         logging.debug("text '%s', state %s, buffer '%s', tokens %s", text, state, readline.get_line_buffer(), tokens)
         if len(tokens) == 1:
             opts = self.commands
         elif len(tokens) == 2:
-            string = tokens[1].split(',')[-1]       #comma-separated list of hosts/roles
+            string = tokens[1].split(',')[-1]       #comma-separated list of hosts/clusters
             if string.find('@') > 0:
-                role = string.split('@')[0]
-                logging.debug(envs)
-                opts = [role + e for e in self.envs]
+                cluster = string.split('@')[0]
+                logging.debug(regions)
+                opts = [cluster + e for e in self.regions]
             else:
-                opts = self.roles
+                opts = self.clusters
 
         if state == 0:
             if text:
@@ -69,16 +63,16 @@ class Butcher(object):
                 'reload': 'reload',
                 'user': 'user USER',
                 'threads': 'threads THREADS',
-                'hostlist': 'hostlist %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...]',
-                'p_exec': 'p_exec %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...] COMMAND',
-                'exec': 'exec %ROLE[@ENV]|HOST[,%ROLE[@ENV]|HOST...] COMMAND'
+                'hostlist': 'hostlist %CLUSTER[@REGION]|HOST[,%CLUSTER[@REGION]|HOST...]',
+                'p_exec': 'p_exec %CLUSTER[@REGION]|HOST[,%CLUSTER[@REGION]|HOST...] COMMAND',
+                'exec': 'exec %CLUSTER[@REGION]|HOST[,%CLUSTER[@REGION]|HOST...] COMMAND'
                 }
         self.user = getpass.getuser()
         self.threads=50
         self._shmux_running = False
         self._load_hosts(cached=cached)
         readline.parse_and_bind('tab: complete')
-        readline.set_completer(CommandCompleter(commands=self.commands, roles=self.roles, envs=self.envs).complete)
+        readline.set_completer(CommandCompleter(commands=self.commands, clusters=self.clusters, regions=self.regions).complete)
         readline.set_completer_delims(' ,')
         histfile=os.path.join(BUTCHER_DIR, 'history')
         try:
@@ -100,7 +94,7 @@ class Butcher(object):
                 raise KeyboardInterrupt
         return __handler
 
-    def _load_hosts(self, env = None, cached=True):
+    def _load_hosts(self, region = None, cached=True):
         cache_filename = os.path.join(BUTCHER_DIR, 'cache.json')
         self.hosts = []
         if not cached or not os.path.isfile(cache_filename):
@@ -113,6 +107,10 @@ class Butcher(object):
 
             for host in data['rows']:
                 name = host.keys()[0]
+                host[name]['clusters'] = host[name]['roles']
+                host[name]['region'] = host[name]['chef_environment']
+                del(host[name]['roles'])
+                del(host[name]['chef_environment'])
                 self.hosts.append(host[name])
             f = open(cache_filename, 'w')
             json.dump(self.hosts, f)
@@ -121,32 +119,32 @@ class Butcher(object):
             f = open(cache_filename, 'r')
             self.hosts = json.load(f)
 
-        self.roles = set()
-        self.envs = set()
+        self.clusters = set()
+        self.regions = set()
         for host in self.hosts:
             logging.debug("Processing host %s", host)
-            self.roles.update(['%' + role for role in host['roles']])
-            self.envs.add('@' + host['chef_environment'])
+            self.clusters.update(['%' + cluster for cluster in host['clusters']])
+            self.regions.add('@' + host['region'])
 
     def _filter_hosts(self, string):
         for token in string.split(','):
             m = re.search('^%([-_A-Z-a-z0-9]+)(?:@([-_A-Za-z0-9]+))?$', token)
             if m:
-                # treat token as %role[@env]
-                (role, env) = m.groups()
-                logging.debug('filtering role %s env %s', role, env)
-                for host in (h for h in self.hosts if role in h['roles']):
-                    if env == None or env == host['chef_environment']:
+                # treat token as %cluster[@region]
+                (cluster, region) = m.groups()
+                logging.debug('filtering cluster %s region %s', cluster, region)
+                for host in (h for h in self.hosts if cluster in h['clusters']):
+                    if region == None or region == host['region']:
                         yield host['hostname']
             else:
                 # treat token as host
                 yield token
 
     def _parse_and_run(self, command):
-        m = re.match("^\s*(?P<cmd>\w+)(?:\s+%(?P<role>[-_A-Za-z0-9]+)(?:@(?P<env>[-_A-Za-z0-9]+))?)?\s*(?P<args>.+)*$", command)
-        # remove extra spaces
-        # command = re.sub("^\s*(\w+)\s+", "\g<1> ", command)
         tokens = shlex.split(command)
+        if not tokens:
+            return
+
         cmd = tokens[0]
         if cmd not in self.commands:
             print "Available commands:\n{}".format(', '.join(self.commands))
