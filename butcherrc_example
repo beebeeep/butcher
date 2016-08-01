@@ -1,0 +1,15 @@
+# vim: set ft=yaml:
+
+butcher_dir: ~/.butcher
+default_threads: 50
+default_user:                                       # leave empty to use your current user 
+refresh_period: 300
+environments:
+    pre:
+        knife_config: ~/.chef/knife-pre.rb
+        default: true
+    qa:
+        knife_config: ~/.chef/knife-qa.rb
+    live:
+        knife_config: ~/.chef/knife-live.rb
+

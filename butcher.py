@@ -1,23 +1,26 @@
 #!/usr/bin/env python
 
 
-import subprocess
-import json
 import os
-import sys
-import shlex
-import readline
-import logging
 import re
+import sys
+import time
+import shlex
 import atexit
 import signal
-import argparse
 import getpass
+import logging
+import readline
+import argparse
 import traceback
+import threading
+import subprocess
+
+import json
+import yaml
 import sqlite3
 
 logging.basicConfig(filename='/tmp/butcher.log', level=logging.DEBUG)
-BUTCHER_DIR = os.path.join(os.environ['HOME'], '.butcher')
 
 
 class CommandCompleter(object):
@@ -86,7 +89,7 @@ class CommandCompleter(object):
 
 class Butcher(object):
 
-    def __init__(self, cached=True):
+    def __init__(self, cached, config):
         self.commands = ['exec', 'p_exec', 'hostlist', 'reload', 'threads', 'user', 'env', 'region', 'unset']
         self.variables = ['environment', 'region', 'user', 'threads']
         self.usage = {
@@ -100,25 +103,36 @@ class Butcher(object):
                 'p_exec': 'p_exec %ROLE[@REGION]|HOST[,%ROLE[@REGION]|HOST...] COMMAND',
                 'exec': 'exec %ROLE[@REGION]|HOST[,%ROLE[@REGION]|HOST...] COMMAND'
                 }
-        self.user = getpass.getuser()
-        self.threads=50
+
+        try:
+            with open(config, 'r') as f:
+                config = yaml.load(f)
+                self.user = config['default_user'] or getpass.getuser()
+                self.threads = config['default_threads']
+                self.knife = config['environments']
+                self.environments = self.knife.keys()
+                self.butcher_dir = os.path.expanduser(config['butcher_dir'])
+                self.refresh_period = config['refresh_period']
+        except IOError as e:
+            print("Cannot read config file: {}".format(e))
+            sys.exit(1)
+
+        self.environment = [x for x in self.knife.keys() if self.knife[x].get('default', 'False')][0]
         self.region = None
-        self.environments = ['pre', 'qa', 'live']
-        #self.environments = ['pre']
-        self.environment = self.environments[0]
         self._shmux_running = False
 
-        if not os.path.isdir(BUTCHER_DIR):
-            os.mkdir(BUTCHER_DIR)
+        if not os.path.isdir(self.butcher_dir):
+            os.mkdir(self.butcher_dir)
 
-        self.db = sqlite3.connect(os.path.join(BUTCHER_DIR, 'butcher.db'))
+        db_path = os.path.join(self.butcher_dir, 'butcher.db')
+        self.db = sqlite3.connect(db_path)
 
-        self._load_hosts(cached=cached)
+        self._load_hosts(cached, clean=True)
 
         readline.parse_and_bind('tab: complete')
         readline.set_completer(CommandCompleter(commands=self.commands, variables=self.variables, db=self.db).complete)
         readline.set_completer_delims(' ,')
-        histfile=os.path.join(BUTCHER_DIR, 'history')
+        histfile=os.path.join(self.butcher_dir, 'history')
         try:
             readline.read_history_file(histfile)
         except IOError:
@@ -126,6 +140,24 @@ class Butcher(object):
         atexit.register(readline.write_history_file, histfile)
         atexit.register(self.db.close)
         signal.signal(signal.SIGINT, self._sigint())
+
+        self.reloader_stop = threading.Event()
+        self.reloader = threading.Thread(target=self._periodic_reload, args=(db_path, self.reloader_stop,))
+        self.reloader.start()
+
+    def _periodic_reload(self, db_path, stop):
+        db = sqlite3.connect(db_path)
+        while True:
+            try:
+                if not stop.wait(self.refresh_period):
+                    logging.info("Refreshing hosts...")
+                    self._load_hosts(cached=False, clean=False, quiet=True, db=db)
+                    logging.info("Hosts refreshed")
+                else:
+                    logging.info("Reloader thread exiting")
+                    return
+            except KeyboardInterrupt:
+                pass
 
     def _get_ps(self):
         if 'pre' in self.environment.lower():
@@ -145,15 +177,15 @@ class Butcher(object):
                 raise KeyboardInterrupt
         return __handler
 
-    @staticmethod
-    def _knife(chef, cmd):
-        cmd = shlex.split("knife {} -c ~/.chef/knife-{}.rb".format(cmd, chef))
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    def _knife(self, chef, cmd, quiet=False):
+        cmd = shlex.split("knife {} -c {}".format(cmd, self.knife[chef]['knife_config']))
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr = subprocess.PIPE if quiet else None)
         return p.stdout
 
-    def _update_hosts(self, chef, query):
-        data = json.load(self._knife(chef, "search node '{}' -a roles -a hostname -a chef_environment -F json".format(query)))
-        cur = self.db.cursor()
+    def _update_hosts(self, chef, query, quiet=False, db=None):
+        db = db or self.db
+        data = json.load(self._knife(chef, "search node '{}' -a roles -a hostname -a chef_environment -F json".format(query), quiet))
+        cur = db.cursor()
         for host in data['rows']:
             hostname = host.keys()[0]
             host = host[host.keys()[0]]
@@ -168,12 +200,18 @@ class Butcher(object):
             del(host['roles'])
             del(host['chef_environment'])
             self.hosts.append(host)
-        self.db.commit()
+        db.commit()
 
-    def _load_hosts(self, cached=True):
-        cache_filename = os.path.join(BUTCHER_DIR, 'cache.json')
+    def _load_hosts(self, cached=True, clean=False, quiet=False, db=None):
         self.hosts = []
-        cur = self.db.cursor()
+        db = db or self.db
+        cur = db.cursor()
+
+        if clean and not cached:
+            for table in ['environments', 'regions', 'roles', 'hosts', 'runlists']:
+                cur.execute("DROP TABLE IF EXISTS {}".format(table))
+            db.commit()
+
         cur.execute("""CREATE TABLE IF NOT EXISTS environments (name TEXT pimary key unique)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS regions (name TEXT PRIMARY KEY unique)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY unique)""")
@@ -183,19 +221,22 @@ class Butcher(object):
         cur.execute("""CREATE INDEX IF NOT EXISTS runlist_host ON runlists(host)""")
         cur.execute("""CREATE INDEX IF NOT EXISTS runlist_role ON runlists(role)""")
         cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS runlist_entry ON runlists(host,role)""")
-        self.db.commit()
+        db.commit()
 
         cur.executemany('INSERT OR IGNORE INTO environments VALUES (?)', ((x,) for x in self.environments))
 
         if not cached:
             for chef in self.environments:
-                print "Loading chef {}...".format(chef)
-                self._update_hosts(chef, '*')
+                if not quiet:
+                    print "Loading chef {}...".format(chef)
+                self._update_hosts(chef, '*', quiet, db)
 
         hosts = cur.execute("SELECT COUNT(*) from hosts").fetchone()[0]
         regions = cur.execute("SELECT COUNT(*) from regions").fetchone()[0]
         roles = cur.execute("SELECT COUNT(*) from roles").fetchone()[0]
-        print "Loaded {} environments: {} hosts and {} roles in {} regions".format(len(self.environments), hosts, roles, regions)
+        db.commit()
+        if not quiet:
+            print "Loaded {} environments: {} hosts and {} roles in {} regions".format(len(self.environments), hosts, roles, regions)
 
     def _filter_hosts(self, string):
         cur = self.db.cursor()
@@ -235,7 +276,7 @@ class Butcher(object):
 
         try:
             if cmd == 'reload':
-                self._load_hosts(cached=False)
+                self._load_hosts(clean=True, cached=False)
             elif cmd == 'threads':
                 if len(tokens) == 1:
                     print "threads = {}".format(self.threads)
@@ -292,14 +333,19 @@ class Butcher(object):
                         raise Exception("Specify command to execute")
 
                     remote_cmd = ' '.join(tokens[2:])
-                    shmux_cmd = shlex.split("shmux -B -M{} -c '{}' -".format(threads, remote_cmd))
+                    logging.debug("remote_cmd='%s'", remote_cmd)
+                    #shmux_cmd = shlex.split("shmux -B -M{} -c '{}' -".format(threads, remote_cmd))
+                    shmux_cmd = shlex.split("shmux -B -M{} -c".format(threads))
+                    shmux_cmd.append(remote_cmd)
+                    shmux_cmd.append('-')
+
 
                     logging.debug("Executing '%s' on %s", shmux_cmd, ','.join(filtered_hosts))
                     try:
                         self._shmux_running = True
                         os.environ['SHMUX_SSH_OPTS'] = '-l {}'.format(self.user)
                         p = subprocess.Popen(shmux_cmd, stdin=subprocess.PIPE)
-                        ret = p.communicate(input='\n'.join(filtered_hosts) + '\n' )
+                        ret = p.communicate(input='\n'.join(filtered_hosts) + '\n')
                     except OSError as e:
                         print "Cannot launch shmux: {}".format(e)
                     finally:
@@ -318,11 +364,13 @@ class Butcher(object):
             except KeyboardInterrupt:
                 print "\n"
             except EOFError:
+                self.reloader_stop.set()
                 print "Bye!"
                 break
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description="Butcher, the shmux shell")
-    p.add_argument('-c', '--cached', action='store_true', default=False)
+    p.add_argument('-a', '--cached', action='store_true', default=False)
+    p.add_argument('-c', '--config', type=str, default=os.path.expanduser('~/.butcherrc'))
     args = p.parse_args()
-    Butcher(cached=args.cached).run()
+    Butcher(**vars(args)).run()
