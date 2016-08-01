@@ -10,6 +10,7 @@ import atexit
 import signal
 import getpass
 import logging
+import logging.handlers
 import readline
 import argparse
 import traceback
@@ -20,8 +21,7 @@ import json
 import yaml
 import sqlite3
 
-logging.basicConfig(filename='/tmp/butcher.log', level=logging.DEBUG)
-
+log = logging.Logger("butcher")
 
 class CommandCompleter(object):
 
@@ -50,7 +50,7 @@ class CommandCompleter(object):
         response = None
         tokens = shlex.split(readline.get_line_buffer())
         opts = []
-        logging.debug("text '%s', state %s, buffer '%s', tokens %s", text, state, readline.get_line_buffer(), tokens)
+        log.debug("text '%s', state %s, buffer '%s', tokens %s", text, state, readline.get_line_buffer(), tokens)
         if not tokens or (len(tokens) == 1 and len(text)):              # only one token and it's not completed
             opts = self.commands
         else:
@@ -79,7 +79,7 @@ class CommandCompleter(object):
                 self.matches = [s for s in opts if s and s.startswith(text)]
             else:
                 self.matches = opts[:]
-            logging.debug("matches %s", self.matches)
+            log.debug("matches %s", self.matches)
 
         try:
             response = self.matches[state]
@@ -113,6 +113,13 @@ class Butcher(object):
                 self.environments = list(self.knife.keys())
                 self.butcher_dir = os.path.expanduser(config['butcher_dir'])
                 self.refresh_period = config['refresh_period']
+
+                loglevel = {'debug': logging.DEBUG, 'info': logging.INFO, 'warning': logging.WARNING, 'error': logging.ERROR, 'critical': logging.CRITICAL}
+                log.setLevel(loglevel[config['log_level']])
+                h = logging.handlers.RotatingFileHandler(os.path.join(self.butcher_dir, 'butcher.log'), maxBytes=1024*1024, backupCount=1)
+                h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)-4.4s] %(name)s: %(message)s"))
+                log.addHandler(h)
+
         except IOError as e:
             print("Cannot read config file: {}".format(e))
             sys.exit(1)
@@ -147,14 +154,15 @@ class Butcher(object):
 
     def _periodic_reload(self, db_path, stop):
         db = sqlite3.connect(db_path)
+        log.info("Reloader thread starting")
         while True:
             try:
                 if not stop.wait(self.refresh_period):
-                    logging.info("Refreshing hosts...")
+                    log.info("Refreshing hosts...")
                     self._load_hosts(cached=False, clean=False, quiet=True, db=db)
-                    logging.info("Hosts refreshed")
+                    log.info("Hosts refreshed")
                 else:
-                    logging.info("Reloader thread exiting")
+                    log.info("Reloader thread exiting")
                     return
             except KeyboardInterrupt:
                 pass
@@ -253,7 +261,7 @@ class Butcher(object):
                     role = role.replace('*', '%')
                     if not region and self.region:
                         region = self.region
-                    logging.debug('filtering role %s region %s', role, region)
+                    log.debug('filtering role %s region %s', role, region)
                     for host in cur.execute(
                         """SELECT runlists.host FROM runlists INNER JOIN hosts ON hosts.name=runlists.host
                             WHERE runlists.role LIKE ? AND hosts.region LIKE ? AND hosts.environment=?""", (role, (region or '%'), self.environment)):
@@ -332,14 +340,14 @@ class Butcher(object):
                         raise Exception("Specify command to execute")
 
                     remote_cmd = ' '.join(tokens[2:])
-                    logging.debug("remote_cmd='%s'", remote_cmd)
+                    log.debug("remote_cmd='%s'", remote_cmd)
                     #shmux_cmd = shlex.split("shmux -B -M{} -c '{}' -".format(threads, remote_cmd))
                     shmux_cmd = shlex.split("shmux -B -M{} -c".format(threads))
                     shmux_cmd.append(remote_cmd)
                     shmux_cmd.append('-')
 
 
-                    logging.debug("Executing '%s' on %s", shmux_cmd, ','.join(filtered_hosts))
+                    log.debug("Executing '%s' on %s", shmux_cmd, ','.join(filtered_hosts))
                     try:
                         self._shmux_running = True
                         os.environ['SHMUX_SSH_OPTS'] = '-l {}'.format(self.user)
@@ -350,7 +358,7 @@ class Butcher(object):
                     finally:
                         self._shmux_running = False
         except Exception as e:
-            logging.debug("Got exception %s, %s", sys.exc_info(), traceback.extract_tb(sys.exc_info()[2]))
+            log.debug("Got exception %s, %s", sys.exc_info(), traceback.extract_tb(sys.exc_info()[2]))
             print("USAGE:\n\t{}".format(self.usage[cmd]))
             return
 

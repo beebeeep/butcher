@@ -4,6 +4,7 @@ butcher_dir: ~/.butcher
 default_threads: 50
 default_user:                                       # leave empty to use your current user 
 refresh_period: 300
+log_level: info
 environments:
     pre:
         knife_config: ~/.chef/knife-pre.rb
