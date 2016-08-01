@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 
 import os
@@ -110,14 +110,14 @@ class Butcher(object):
                 self.user = config['default_user'] or getpass.getuser()
                 self.threads = config['default_threads']
                 self.knife = config['environments']
-                self.environments = self.knife.keys()
+                self.environments = list(self.knife.keys())
                 self.butcher_dir = os.path.expanduser(config['butcher_dir'])
                 self.refresh_period = config['refresh_period']
         except IOError as e:
             print("Cannot read config file: {}".format(e))
             sys.exit(1)
 
-        self.environment = [x for x in self.knife.keys() if self.knife[x].get('default', 'False')][0]
+        self.environment = [k for k,v in self.knife.items() if v.get('default')][0]
         self.region = None
         self._shmux_running = False
 
@@ -179,16 +179,16 @@ class Butcher(object):
 
     def _knife(self, chef, cmd, quiet=False):
         cmd = shlex.split("knife {} -c {}".format(cmd, self.knife[chef]['knife_config']))
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr = subprocess.PIPE if quiet else None)
-        return p.stdout
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr = subprocess.PIPE if quiet else None, start_new_session = quiet)
+        return p.stdout.read().decode('utf-8')
 
     def _update_hosts(self, chef, query, quiet=False, db=None):
         db = db or self.db
-        data = json.load(self._knife(chef, "search node '{}' -a roles -a hostname -a chef_environment -F json".format(query), quiet))
+        data = json.loads(self._knife(chef, "search node '{}' -a roles -a hostname -a chef_environment -F json".format(query), quiet))
         cur = db.cursor()
         for host in data['rows']:
-            hostname = host.keys()[0]
-            host = host[host.keys()[0]]
+            hostname = list(host.keys())[0]
+            host = host[list(host.keys())[0]]
             cur.execute('INSERT OR IGNORE INTO regions VALUES (?)', (host['chef_environment'],))
             cur.execute('INSERT OR REPLACE INTO hosts VALUES (?, ?, ?)', (hostname, host['chef_environment'], chef))
             cur.execute("DELETE FROM runlists WHERE host=? AND role NOT IN({})".format(','.join("'" + x + "'" for x in host['roles'])), (hostname,))
@@ -221,14 +221,13 @@ class Butcher(object):
         cur.execute("""CREATE INDEX IF NOT EXISTS runlist_host ON runlists(host)""")
         cur.execute("""CREATE INDEX IF NOT EXISTS runlist_role ON runlists(role)""")
         cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS runlist_entry ON runlists(host,role)""")
-        db.commit()
-
         cur.executemany('INSERT OR IGNORE INTO environments VALUES (?)', ((x,) for x in self.environments))
+        db.commit()
 
         if not cached:
             for chef in self.environments:
                 if not quiet:
-                    print "Loading chef {}...".format(chef)
+                    print("Loading chef {}...".format(chef))
                 self._update_hosts(chef, '*', quiet, db)
 
         hosts = cur.execute("SELECT COUNT(*) from hosts").fetchone()[0]
@@ -236,7 +235,7 @@ class Butcher(object):
         roles = cur.execute("SELECT COUNT(*) from roles").fetchone()[0]
         db.commit()
         if not quiet:
-            print "Loaded {} environments: {} hosts and {} roles in {} regions".format(len(self.environments), hosts, roles, regions)
+            print("Loaded {} environments: {} hosts and {} roles in {} regions".format(len(self.environments), hosts, roles, regions))
 
     def _filter_hosts(self, string):
         cur = self.db.cursor()
@@ -271,7 +270,7 @@ class Butcher(object):
 
         cmd = tokens[0]
         if cmd not in self.commands:
-            print "Available commands:\n{}".format(', '.join(self.commands))
+            print("Available commands:\n{}".format(', '.join(self.commands)))
             return
 
         try:
@@ -279,17 +278,17 @@ class Butcher(object):
                 self._load_hosts(clean=True, cached=False)
             elif cmd == 'threads':
                 if len(tokens) == 1:
-                    print "threads = {}".format(self.threads)
+                    print("threads = {}".format(self.threads))
                 else:
                     self.threads = int(tokens[1])
             elif cmd == 'env':
                 if len(tokens) == 1:
-                    print "env = {}".format(self.environment)
+                    print("env = {}".format(self.environment))
                 else:
                     self.environment = tokens[1]
             elif cmd == 'region':
                 if len(tokens) == 1:
-                    print "region = {}".format(self.region)
+                    print("region = {}".format(self.region))
                     return
                 else:
                     self.region = tokens[1]
@@ -305,7 +304,7 @@ class Butcher(object):
                     self.threads = 50
             elif cmd == 'user':
                 if len(tokens) == 1:
-                    print "user = {}".format(self.user)
+                    print("user = {}".format(self.user))
                 else:
                     self.user = tokens[1]
             elif cmd in ('hostlist', 'exec', 'p_exec'):
@@ -320,8 +319,8 @@ class Butcher(object):
                     i = 0
                     for host in set(self._filter_hosts(hoststring)):
                         i += 1
-                        print host
-                    print "\n{} host{} total".format(i, 's' if i > 1 else '')
+                        print(host)
+                    print("\n{} host{} total".format(i, 's' if i > 1 else ''))
                 else:
                     filtered_hosts = set(self._filter_hosts(tokens[1]))
                     if cmd == 'exec':
@@ -347,25 +346,25 @@ class Butcher(object):
                         p = subprocess.Popen(shmux_cmd, stdin=subprocess.PIPE)
                         ret = p.communicate(input='\n'.join(filtered_hosts) + '\n')
                     except OSError as e:
-                        print "Cannot launch shmux: {}".format(e)
+                        print("Cannot launch shmux: {}".format(e))
                     finally:
                         self._shmux_running = False
         except Exception as e:
-            logging.debug("Got exception %s, %s", sys.exc_info(), traceback.extract_tb(sys.exc_traceback))
-            print "USAGE:\n\t{}".format(self.usage[cmd])
+            logging.debug("Got exception %s, %s", sys.exc_info(), traceback.extract_tb(sys.exc_info()[2]))
+            print("USAGE:\n\t{}".format(self.usage[cmd]))
             return
 
 
     def run(self):
         while True:
             try:
-                command = raw_input(self._get_ps())
+                command = input(self._get_ps())
                 self._parse_and_run(command)
             except KeyboardInterrupt:
-                print "\n"
+                print("\n")
             except EOFError:
                 self.reloader_stop.set()
-                print "Bye!"
+                print("Bye!")
                 break
 
 if __name__ == '__main__':
