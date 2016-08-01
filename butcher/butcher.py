@@ -5,10 +5,12 @@ import os
 import re
 import sys
 import time
+import json
 import shlex
 import atexit
 import signal
 import getpass
+import sqlite3
 import logging
 import logging.handlers
 import readline
@@ -17,9 +19,7 @@ import traceback
 import threading
 import subprocess
 
-import json
 import yaml
-import sqlite3
 
 log = logging.Logger("butcher")
 
@@ -375,7 +375,7 @@ class Butcher(object):
                 print("Bye!")
                 break
 
-if __name__ == '__main__':
+def main():
     p = argparse.ArgumentParser(description="Butcher, the shmux shell")
     p.add_argument('-a', '--cached', action='store_true', default=False)
     p.add_argument('-c', '--config', type=str, default=os.path.expanduser('~/.butcherrc'))
