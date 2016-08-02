@@ -19,7 +19,7 @@ Copy `butcherrc_example <https://github.com/beebeeep/butcher/blob/master/butcher
 
 Usage
 -----
-First run of ``butcher`` may take some time as it fetches hosts information from Chef servers you configured in ~/.butcherrc. After that, you can start it with -a parameter, i.e ``butcher -a`` to use cached data (this data is periodically upgrading in background while butcher is running). 
+First run of ``butcher`` may take some time as it fetches hosts information from Chef servers you configured in ~/.butcherrc. After that, you can start it with -a parameter, i.e ``butcher -a`` to use cached data (this data is periodically refreshed in background while butcher is running). 
 
 Once you get into butcher shell, your current environment, region and user will be displayed in prompt string. Environments are chef servers you configured, you are always working within specific environment i.e with single Chef server. Regions are actual Chef environments, you can select specific one with ``region`` command or say ``unset region`` to use all. User is actualy user that will be used for ssh-ing to hosts, can be changed with command ``set user`` or reseted to current user using ``unset``. 
 
