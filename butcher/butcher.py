@@ -352,7 +352,7 @@ class Butcher(object):
                         self._shmux_running = True
                         os.environ['SHMUX_SSH_OPTS'] = '-l {}'.format(self.user)
                         p = subprocess.Popen(shmux_cmd, stdin=subprocess.PIPE)
-                        ret = p.communicate(input='\n'.join(filtered_hosts) + '\n')
+                        ret = p.communicate(input=bytes('\n'.join(filtered_hosts) + '\n', encoding='utf-8'))
                     except OSError as e:
                         print("Cannot launch shmux: {}".format(e))
                     finally:
@@ -377,7 +377,7 @@ class Butcher(object):
 
 def main():
     p = argparse.ArgumentParser(description="Butcher, the shmux shell")
-    p.add_argument('-a', '--cached', action='store_true', default=False)
+    p.add_argument('-a', '--cached', action='store_true', default=False, help='Do not update hosts database')
     p.add_argument('-c', '--config', type=str, default=os.path.expanduser('~/.butcherrc'))
     args = p.parse_args()
     Butcher(**vars(args)).run()
