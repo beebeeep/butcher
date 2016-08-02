@@ -25,8 +25,8 @@ Once you get into butcher shell, your current environment, region and user will 
 
 Main commands are:
 
-  * ``hostlist SELECTOR`` - displays hosts matching SELECTOR
-  * ``p_exec SELECTOR CMD`` - executes CMD on hosts matching SELECTOR in parallel (maximum number of threads can be set using ``threads`` commands)
-  * ``exec SELECTOR CMD`` - same as ``p_exec``, but sequentially, in one thread. 
+* ``hostlist SELECTOR`` - displays hosts matching SELECTOR
+* ``p_exec SELECTOR CMD`` - executes CMD on hosts matching SELECTOR in parallel (maximum number of threads can be set using ``threads`` commands)
+* ``exec SELECTOR CMD`` - same as ``p_exec``, but sequentially, in one thread. 
 
 SELECTOR is comma-separated list of hosts or expressions like ``%ROLE[@REGION]``, where ROLE is actual chef role (``*`` glob can be used) and REGION is region, i.e. Chef environment (if missing, current region will be used)
